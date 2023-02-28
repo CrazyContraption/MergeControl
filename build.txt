@@ -1,0 +1,3 @@
+displayName = Merge Control
+author = CrazyContraption
+version = 0.1
