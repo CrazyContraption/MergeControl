@@ -1,11 +1,9 @@
 ﻿using System.Drawing;
-using System.IO;
-using System.Threading;
-using System.Threading.Tasks;
 using Terraria;
 using Terraria.Audio;
 using Terraria.ID;
 using Terraria.ModLoader;
+using static MergeControl.Enumerations;
 
 namespace MergeControl.Items
 {
@@ -15,23 +13,28 @@ namespace MergeControl.Items
         /// The current mode of all <seealso cref="Chisel"/>s on the current player.<br/>
         /// See <seealso cref="Mode"/> for assignments.
         /// </summary>
-        internal static Mode ToolMode;
+        private static Mode ToolMode;
 
         public override bool? UseItem(Player player)
         {
+            if (Main.netMode == NetmodeID.Server)
+                return null;
+
             if (MergeControl.Selection.IsEmpty is false)
                 return false;
 
-            if (player.altFunctionUse is ItemAlternativeFunctionID.None)
+            if (Main.mouseLeft)
             {
-                _ = Task.Run(delegate // Create a new thread
+                new System.Threading.Tasks.Task(delegate // Create a new thread
                 {
                     int x = Player.tileTargetX;
                     int y = Player.tileTargetY;
                     Tile tile = Framing.GetTileSafely(x, y);
                     bool changedFromStartPoint = false;
 
-                    for (uint iterations = 0; Main.mouseLeft; iterations++)
+                    MergeType? type = null;
+
+                    for (ushort iterations = 0; Main.mouseLeft; iterations++)
                     {
                         if (changedFromStartPoint is false && (x != Player.tileTargetX || y != Player.tileTargetY))
                             changedFromStartPoint = true;
@@ -41,23 +44,18 @@ namespace MergeControl.Items
                         MergeControl.Selection.Width = System.Math.Max(x, Player.tileTargetX) - MergeControl.Selection.X + 1;
                         MergeControl.Selection.Height = System.Math.Max(y, Player.tileTargetY) - MergeControl.Selection.Y + 1;
 
-                        if (player.HasEnoughPickPowerToHurtTile(x, y))
+                        if (player.HasEnoughPickPowerToHurtTile(x, y) is false)
                             continue;
 
                         if (ToolMode is Mode.Chisel && changedFromStartPoint is false && iterations >= 16 && iterations % 2 == 0)
                             if (tile.HasTile || tile.IsActuated)
-                            {
-                                TileInfo.MergeType type = MergeControl.GetMerging(tile);
-                                DoAlteration(tile, type);
-                            }
+                                type = DoAlteration(tile);
 
-                        Thread.Sleep(32);
+                        System.Threading.Thread.Sleep(32);
                     }
 
-                    if (Main.mouseLeft is false && Main.netMode == NetmodeID.MultiplayerClient)
+                    if (type != null && changedFromStartPoint is false && Main.netMode == NetmodeID.MultiplayerClient)
                     {
-                        TileInfo.MergeType type = MergeControl.GetMerging(tile);
-
                         ModPacket packet = MergeControl.MyMod.GetPacket();
                         packet.Write((byte)type);
                         packet.Write((ushort)x);
@@ -68,42 +66,39 @@ namespace MergeControl.Items
                     for (int row = MergeControl.Selection.Top; row < MergeControl.Selection.Bottom; row++)
                         for (int col = MergeControl.Selection.Left; col < MergeControl.Selection.Right; col++)
                         {
-                            if (player.HasEnoughPickPowerToHurtTile(col, row))
+                            if (player.HasEnoughPickPowerToHurtTile(col, row) is false)
                                 continue;
 
                             Tile subTile = Framing.GetTileSafely(col, row);
-                            if (subTile.HasTile || WorldGen.SolidTile(col, row, true) || subTile.IsActuated || changedFromStartPoint is false || ToolMode is Mode.Reset)
+                            if (subTile.HasTile && (WorldGen.SolidTile(col, row, true) || subTile.IsActuated || changedFromStartPoint is false) || ToolMode is Mode.Reset)
                             {
-                                TileInfo.MergeType type = MergeControl.GetMerging(subTile);
+                                type = DoAlteration(subTile);
 
                                 if (Main.netMode == NetmodeID.MultiplayerClient)
                                 {
                                     ModPacket packet = MergeControl.MyMod.GetPacket();
                                     packet.Write((byte)type);
-                                    packet.Write((ushort)x);
-                                    packet.Write((ushort)y);
+                                    packet.Write((ushort)col);
+                                    packet.Write((ushort)row);
                                     packet.Send(-1, Main.myPlayer);
                                 }
 
-                                DoAlteration(subTile, type);
-                            }
-                        }
-                    for (int row = MergeControl.Selection.Top; row < MergeControl.Selection.Bottom; row++)
-                        for (int col = MergeControl.Selection.Left; col < MergeControl.Selection.Right; col++)
-                        {
-                            Tile subTile = Framing.GetTileSafely(col, row);
-                            if (subTile.HasTile || WorldGen.SolidTile(col, row, true) || subTile.IsActuated || changedFromStartPoint is false || ToolMode is Mode.Reset)
                                 WorldGen.TileFrame(col, row, false, true);
+                            }
                         }
 
                     _ = SoundEngine.PlaySound(SoundID.Tink, new Microsoft.Xna.Framework.Vector2(Player.tileTargetX, Player.tileTargetY));
                     MergeControl.Selection = Rectangle.Empty;
-                });
+                }).Start();
             }
-            else if (player.altFunctionUse is not ItemAlternativeFunctionID.None)
+            else if (Main.mouseRight)
             {
                 ToolMode = ToolMode >= Mode.Group4 ? 0 : ToolMode + 1;
-                Main.NewText(GetSettingText(), Microsoft.Xna.Framework.Color.Orange);
+
+                if (ToolMode == Mode.Actuate && NPC.downedBoss3 is false) // Actuate and skeletron is not dead
+                    ToolMode++; // Skip the mode
+
+                MergeControl.Log(GetSettingText(), LogType.Info, Microsoft.Xna.Framework.Color.Orange);
                 player.altFunctionUse = ItemAlternativeFunctionID.ActivatedAndUsed;
             }
             
@@ -111,10 +106,13 @@ namespace MergeControl.Items
         }
 
         public override bool CanUseItem(Player player)
-            => MergeControl.Selection.IsEmpty;
+            => Main.netMode == NetmodeID.Server || MergeControl.Selection.IsEmpty;
 
         public override void UpdateInventory(Player player)
         {
+            if (Main.netMode == NetmodeID.Server)
+                return;
+
             if (player.HeldItem is not null && player.HeldItem.Name.Equals("Chisel", System.StringComparison.OrdinalIgnoreCase))
             {
                 Tile tile = Framing.GetTileSafely(Player.tileTargetX, Player.tileTargetY);
@@ -132,39 +130,44 @@ namespace MergeControl.Items
         /// <param name="tile"><paramref name="tile"/> instance to be altered.</param>
         /// <param name="mergeType">The <paramref name="mergeType"/> to be applied to the <paramref name="tile"/>.</param>
         /// <param name="mode">Optionally include a mode to override the tool's current mode.<br/>
+        /// <returns>Grouping type of the tile that was set, see <seealso cref="MergeType"/> for assignments.</returns>
         /// Can be used for multiplayer puppetting.</param>
-        internal static void DoAlteration(Tile tile, TileInfo.MergeType mergeType, Mode? mode = null)
+        private static MergeType DoAlteration(Tile tile, Mode? mode = null)
         {
+            MergeType mergeType = MergeType.Default;
             switch (mode ?? ToolMode)
             {
                 case Mode.Chisel:
+                    mergeType = MergeControl.GetMerging(tile);
                     if ((byte)mergeType >= 1 && (byte)mergeType <= 183)
-                        MergeControl.SetMerging(tile, mergeType + 1);
+                        MergeControl.SetMerging(tile, ++mergeType);
                     else
-                        MergeControl.SetMerging(tile, (TileInfo.MergeType)1);
+                        MergeControl.SetMerging(tile, mergeType = (MergeType)1);
                     break;
                 case Mode.None:
-                    MergeControl.SetMerging(tile, TileInfo.MergeType.None);
+                    MergeControl.SetMerging(tile, mergeType = MergeType.Alone);
                     break;
                 case Mode.Group1:
-                    MergeControl.SetMerging(tile, TileInfo.MergeType.Group1);
+                    MergeControl.SetMerging(tile, mergeType = MergeType.Group1);
                     break;
                 case Mode.Group2:
-                    MergeControl.SetMerging(tile, TileInfo.MergeType.Group2);
+                    MergeControl.SetMerging(tile, mergeType = MergeType.Group2);
                     break;
                 case Mode.Group3:
-                    MergeControl.SetMerging(tile, TileInfo.MergeType.Group3);
+                    MergeControl.SetMerging(tile, mergeType = MergeType.Group3);
                     break;
                 case Mode.Group4:
-                    MergeControl.SetMerging(tile, TileInfo.MergeType.Group4);
+                    MergeControl.SetMerging(tile, mergeType = MergeType.Group4);
                     break;
                 case Mode.Actuate:
                     tile.IsActuated = !tile.IsActuated;
+                    mergeType = MergeType.Actuation;
                     break;
                 default:
-                    MergeControl.SetMerging(tile, TileInfo.MergeType.Default);
+                    MergeControl.SetMerging(tile, MergeType.Default);
                     break;
             }
+            return mergeType;
         }
 
         /// <summary>
@@ -224,7 +227,7 @@ namespace MergeControl.Items
             recipe.Register();
         }
 
-        public enum Mode : byte
+        private enum Mode : byte
         {
             /// <summary>Resets tiles back to vanilla framing.</summary>
             Reset = 0,

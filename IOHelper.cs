@@ -33,9 +33,16 @@ namespace MergeControl
 
 		public override void LoadWorldData(TagCompound tag)
 		{
-			if (tag.GetByteArray("merging") is byte[] infoData)
-				// Decompress the data
-				TransformData(IOHelper.Decompress(infoData, CompressionLevel.BestSpeed), Main.tile.GetData<TileInfo>());
+			try
+			{
+				if (tag.GetByteArray("merging") is byte[] infoData)
+					// Decompress the data
+					TransformData(IOHelper.Decompress(infoData, CompressionLevel.BestSpeed), Main.tile.GetData<TileInfo>());
+			}
+			catch (System.Exception ex)
+            {
+				MergeControl.MyMod.Logger.Error(ex);
+            }
 		}
 
 		/// <summary>
@@ -73,10 +80,7 @@ namespace MergeControl
 		private static void TransformData(byte[] data, TileInfo[] existing)
 		{
 			if (data.Length != existing.Length)
-			{
-				//SerousMachines.Instance.Logger.Warn($"Saved data length ({data.Length}) did not match the world data length ({existing.Length}).  Data will not be loaded.");
 				return;
-			}
 
 			unsafe
 			{

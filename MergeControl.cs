@@ -1,9 +1,11 @@
-using System.Drawing;
 using System.IO;
-using MergeControl.Items;
-using Terraria;
-using Terraria.ID;
-using Terraria.ModLoader;
+using System.Threading.Tasks;			// Tasks
+using MergeControl.Items;				// Chisel
+using Microsoft.Xna.Framework;			// Color
+using Terraria;							// Terraria, mostly Main
+using Terraria.ID;						// TileIDs
+using Terraria.ModLoader;				// Hooks n'stuff
+using static MergeControl.Enumerations;	// Non-Class public Enumerations
 
 namespace MergeControl
 {
@@ -12,7 +14,7 @@ namespace MergeControl
 		/// <summary>
 		/// Selection to be drawn by <seealso cref="WorldIO.PostDrawTiles"/> when using the <seealso cref="Chisel"/>'s main action.
 		/// </summary>
-		internal static Rectangle Selection;
+		internal static System.Drawing.Rectangle Selection;
 
 		/// <summary>
 		/// Static tModLoader instance of <seealso cref="MergeControl"/>
@@ -27,23 +29,63 @@ namespace MergeControl
 
 		public override void HandlePacket(BinaryReader reader, int whoAmI)
 		{
+			MergeType actionType = (MergeType)reader.ReadByte();
+
+			if (actionType is MergeType.Handshake && Main.netMode is NetmodeID.Server)
+            {
+				MyMod.Logger.Info($"Handshake requested by Client {whoAmI}. Starting thread.");
+				new Task(delegate // Create a new thread
+				{
+					System.Diagnostics.Stopwatch timer = System.Diagnostics.Stopwatch.StartNew();
+					Log($"Thread started, now parsing/sending world data...", LogType.Info, Color.Yellow);
+					uint updates = 0;
+					for (ushort row = 0; row <= Main.maxTilesY; row++)
+						for (ushort col = 0; col <= Main.maxTilesX; col++)
+						{
+							Tile tile = Framing.GetTileSafely(col, row);
+							if (tile.HasTile || tile.IsActuated)
+							{
+								MergeType type = GetMerging(tile);
+								if (type is MergeType.Default)
+									continue;
+
+								ModPacket packet = MyMod.GetPacket();
+								packet.Write((byte)type);
+								packet.Write(col);
+								packet.Write(row);
+								packet.Send(whoAmI);
+								updates++;
+							}
+						}
+					timer.Stop();
+					Log($"World data parsed and sent to Client {whoAmI}!", LogType.Info, Color.Yellow);
+					Log($"Thread took {timer.ElapsedMilliseconds}ms, {updates} tiles were accounted for.", LogType.Info, Color.AliceBlue);
+
+				}).Start();
+				return;
+			}
+
 			/*
 				byte origin = (byte)whoAmI;
 				if (Main.netMode != NetmodeID.Server)
 					origin = reader.ReadByte();
 			*/
 
-			byte type = reader.ReadByte();
 			ushort x = reader.ReadUInt16();
 			ushort y = reader.ReadUInt16();
 
-			Chisel.DoAlteration(Framing.GetTileSafely(x, y), (TileInfo.MergeType)type);
 
-			if (Main.netMode == NetmodeID.Server)
+			Tile tile = Framing.GetTileSafely(x, y);
+			if (actionType is not MergeType.Actuation)
+				SetMerging(tile, actionType);
+			else
+				tile.IsActuated = !tile.IsActuated;
+
+			if (Main.netMode is NetmodeID.Server)
             {
 				ModPacket packet = GetPacket();
 				//packet.Write((byte)whoAmI);
-				packet.Write(type);
+				packet.Write((byte)actionType);
 				packet.Write(x);
 				packet.Write(y);
 				packet.Send(-1, whoAmI);
@@ -61,22 +103,24 @@ namespace MergeControl
 			if (Main.PlayerLoaded)
 			{
 				Tile tile = Framing.GetTileSafely(x, y);
-				TileInfo.MergeType type = GetMerging(tile);
+				if (tile.HasTile is false && tile.IsActuated is false)
+					return;
 
+				MergeType type = GetMerging(tile);
 				switch (type)
                 {
-					case TileInfo.MergeType.Default:
+					case MergeType.Default:
 						orig(x, y, resetFrame, noBreak);
 						return;
 
-					case TileInfo.MergeType.None:
+					case MergeType.Alone:
 						SetFraming(tile, 9 + Main.rand.Next(3), 3); // Same as below, but less overhead per-tile
 						return;
 
-					case TileInfo.MergeType.Group1:
-					case TileInfo.MergeType.Group2:
-					case TileInfo.MergeType.Group3:
-					case TileInfo.MergeType.Group4:
+					case MergeType.Group11
+					case MergeType.Group2:
+					case MergeType.Group3:
+					case MergeType.Group4:
 						bool?[] merges =
 						{
 							GetMergeType(tile.TileType, x, y - 1, type),     // N
@@ -119,14 +163,10 @@ namespace MergeControl
 						if (resetFrame)
 							return;
 						
-						if (merges[0] is not null)
-							WorldGen.TileFrame(x, y - 1, true, true);
-						if (merges[2] is not null)
-							WorldGen.TileFrame(x + 1, y, true, true);
-						if (merges[4] is not null)
-							WorldGen.TileFrame(x, y + 1, true, true);
-						if (merges[6] is not null)
-							WorldGen.TileFrame(x - 1, y, true, true);
+						WorldGen.TileFrame(x, y - 1, true, true);
+						WorldGen.TileFrame(x + 1, y, true, true);
+						WorldGen.TileFrame(x, y + 1, true, true);
+						WorldGen.TileFrame(x - 1, y, true, true);
 						return;
                 }
 				Point framing = GetFramingFromMergeData((byte)GetMerging(tile));
@@ -142,7 +182,7 @@ namespace MergeControl
 		/// Used to painting tiles from memory.
 		/// </summary>
 		/// <param name="mergeType">The frame index of the tile.<br/>
-		/// Value is offset, See <seealso cref="TileInfo.MergeType"/> for assignment information.</param>
+		/// Value is offset, See <seealso cref="MergeType"/> for assignment information.</param>
 		/// <returns><seealso cref="Point"/> of the X,Y location that the tile's framing should be set to.</returns>
 		internal static Point GetFramingFromMergeData(byte mergeType)
         {
@@ -183,19 +223,22 @@ namespace MergeControl
 		/// <param name="y">Y value of the query tile's location.</param>
 		/// <param name="originGroup">Grouping of the tile we're trying to merge to the x,y tile.</param>
 		/// <returns>Nullable boolean. True is same type, should merge. False is dirt or other alt-merge. Null is air/non-group (no merge).</returns>
-		private static bool? GetMergeType(int originType, int x, int y, TileInfo.MergeType originGroup = TileInfo.MergeType.Default)
+		private static bool? GetMergeType(int originType, int x, int y, MergeType originGroup = MergeType.Default)
         {
 			Tile tile = Framing.GetTileSafely(x, y);
-			if (tile.HasTile && originGroup == GetMerging(tile)) // Exists and part of same grouping
-				if (tile.TileType > TileID.Dirt || tile.TileType == originType) // Not dirt, or same as origin
-					return true; // Should merge
-				//else if (tile.TileType == 0)
-					//return null; // Dirt
+			if (tile.HasTile || tile.IsActuated)
+				if (originGroup == GetMerging(tile)) // Exists and part of same grouping
+					if (tile.TileType > TileID.Dirt || tile.TileType == originType) // Not dirt, or same as origin
+						return true; // Should merge
+#if DEBUG
+					else
+						return false; // Dirt
+#endif
 			return null; // Air or other
         }
 
 		/// <summary>
-		/// Sets the framing of a tile based on the <seealso cref="GetMergeType(int, int, int, TileInfo.MergeType)"/> status of each of the adjacent 8 tiles.
+		/// Sets the framing of a tile based on the <seealso cref="GetMergeType(int, int, int, MergeType)"/> status of each of the adjacent 8 tiles.
 		/// </summary>
 		/// <param name="tile"></param>
 		/// <param name="N"></param>
@@ -217,7 +260,7 @@ namespace MergeControl
 			bool? NW = null
 		) { // 45 states
 			// TODO: Change "true" to checking if random frame variations should be used or not.
-			int randomVariation = true ? Main.rand.Next(3) : tile.TileFrameNumber;
+			int randomVariation = TileID.Sets.AllBlocksWithSmoothBordersToResolveHalfBlockIssue[tile.TileType] is false ? Main.rand.Next(3) : tile.TileFrameNumber;
 			switch ((N, NE, E, SE, S, SW, W, NW))
 			{
 				case (null, null, null, null, null, null, null, null): // None
@@ -412,8 +455,8 @@ namespace MergeControl
 		/// Checks modded world memory for the merge grouping of a specific tile.
 		/// </summary>
 		/// <param name="tile"><paramref name="tile"/> that should checked in storage.</param>
-		/// <returns>Grouping type of the tile, see <seealso cref="TileInfo.MergeType"/> for assignments.</returns>
-		internal static TileInfo.MergeType GetMerging(Tile tile)
+		/// <returns>Grouping type of the tile, see <seealso cref="MergeType"/> for assignments.</returns>
+		internal static MergeType GetMerging(Tile tile)
 			=> tile.Get<TileInfo>().Merging;
 
 		/// <summary>
@@ -421,29 +464,44 @@ namespace MergeControl
 		/// </summary>
 		/// <param name="x">The <paramref name="x"/> value for the <seealso cref="Tile"/> instance to grab.</param>
 		/// <param name="y">The <paramref name="y"/> value for the <seealso cref="Tile"/> instance to grab.</param>
-		/// <returns>Grouping type of the tile, see <seealso cref="TileInfo.MergeType"/> for assignments.</returns>
-		internal static TileInfo.MergeType GetMerging(int x, int y)
+		/// <returns>Grouping type of the tile, see <seealso cref="MergeType"/> for assignments.</returns>
+		internal static MergeType GetMerging(int x, int y)
 			=> GetMerging(Framing.GetTileSafely(x, y));
 
 		/// <summary>
 		/// Sets modded world memory for the merge grouping of a specified <paramref name="tile"/>.
 		/// </summary>
 		/// <param name="tile">The <paramref name="tile"/> that should updated to storage.</param>
-		/// <param name="mergeType">Grouping type to be set, see <seealso cref="TileInfo.MergeType"/> for assignments.</param>
-		internal static void SetMerging(Tile tile, TileInfo.MergeType mergeType = TileInfo.MergeType.Default)
+		/// <param name="mergeType">Grouping type to be set, see <seealso cref="MergeType"/> for assignments.</param>
+		internal static void SetMerging(Tile tile, MergeType mergeType = MergeType.Default)
 		{
 			ref TileInfo info = ref tile.Get<TileInfo>();
 			info.Merging = mergeType;
 		}
 
 		/// <summary>
-		/// Same as <seealso cref="SetMerging(Tile, TileInfo.MergeType)", but safely grabs the <seealso cref="Tile"/> instance for you./>
+		/// Same as <seealso cref="SetMerging(Tile, MergeType)", but safely grabs the <seealso cref="Tile"/> instance for you./>
 		/// </summary>
 		/// <param name="x">The <paramref name="x"/> value for the <seealso cref="Tile"/> instance to grab.</param>
 		/// <param name="y">The <paramref name="y"/> value for the <seealso cref="Tile"/> instance to grab.</param>
-		/// <param name="mergeType">Grouping type to be set, see <seealso cref="TileInfo.MergeType"/> for assignments.</param>
-		internal static void SetMerging(int x, int y, TileInfo.MergeType mergeType = TileInfo.MergeType.Default)
+		/// <param name="mergeType">Grouping type to be set, see <seealso cref="MergeType"/> for assignments.</param>
+		internal static void SetMerging(int x, int y, MergeType mergeType = MergeType.Default)
 			=> SetMerging(Framing.GetTileSafely(x, y), mergeType);
+
+		internal static void Log(string text, LogType logType = LogType.None, Color color = default)
+        {
+            switch (logType)
+            {
+                case LogType.Info: MyMod.Logger.Info(text); break;
+                case LogType.Warning: MyMod.Logger.Warn(text); break;
+                case LogType.Error: MyMod.Logger.Error(text); break;
+				case LogType.Fatal: MyMod.Logger.Fatal(text); break;
+				case LogType.Debug: MyMod.Logger.Debug(text); break;
+            }
+
+            if (Main.netMode is not NetmodeID.Server && color != default)
+				Main.NewText(text, color);
+        }
 	}
 
 	public class MergeTile : GlobalTile
@@ -451,40 +509,44 @@ namespace MergeControl
         public override void KillTile(int x, int y, int type, ref bool fail, ref bool effectOnly, ref bool noItem)
         {
 			Tile tile = Framing.GetTileSafely(x, y);
-			if (MergeControl.GetMerging(tile) is not TileInfo.MergeType.Default)
+			if (MergeControl.GetMerging(tile) is not MergeType.Default)
             {
-				MergeControl.SetMerging(tile, TileInfo.MergeType.Default);
+				MergeControl.SetMerging(tile, MergeType.Default);
+
+				if (Main.netMode == NetmodeID.MultiplayerClient)
+				{
+					ModPacket packet = MergeControl.MyMod.GetPacket();
+					packet.Write((byte)MergeType.Default);
+					packet.Write((ushort)x);
+					packet.Write((ushort)y);
+					packet.Send(-1, Main.myPlayer);
+				}
+
 				WorldGen.TileFrame(x, y, noBreak: true);
 				fail = true;
             }
 		}
     }
 
-	public struct TileInfo : ITileData
-	{
-		public enum MergeType : byte
+	public class MergePlayer : ModPlayer
+    {
+		public override void OnEnterWorld(Player player)
 		{
-			/// <summary>The tile merges normally</summary>
-			Default = 0,
+			if (Main.netMode is NetmodeID.MultiplayerClient)
+				new Task(delegate // Create a new thread
+				{
+					while (Main.PlayerLoaded is false)
+						System.Threading.Thread.Sleep(100);
 
-			// Ranges 1 - 250 are reserved for manual sprites
-
-			/// <summary>Actuate tile - used for packets exclusively.</summary>
-			Actuation = byte.MaxValue - 5,
-
-			/// <summary>No merging - act as if always surrounded by air.</summary>
-			None = byte.MaxValue - 4,
-
-			/// <summary>Grouping 1 - Only merge with other group 1 tiles</summary>
-			Group1 = byte.MaxValue - 3,
-			/// <summary>Grouping 2 - Only merge with other group 2 tiles</summary>
-			Group2 = byte.MaxValue - 2,
-			/// <summary>Grouping 3 - Only merge with other group 3 tiles</summary>
-			Group3 = byte.MaxValue - 1,
-			/// <summary>Grouping 4 - Only merge with other group 4 tiles</summary>
-			Group4 = byte.MaxValue,
+					ModPacket packet = MergeControl.MyMod.GetPacket();
+					packet.Write((byte)MergeType.Handshake);
+					packet.Send(-1, Main.myPlayer);
+				}).Start();
 		}
+    }
 
+	internal struct TileInfo : ITileData
+	{
 		/// <summary>
 		/// Temporary storage of byte data for writing and reading to/from memory.
 		/// </summary>
@@ -493,7 +555,7 @@ namespace MergeControl
 		/// <summary>
 		/// Converts between byte tile memory, and our <seealso cref="MergeType"/> enumeration.
 		/// </summary>
-		public MergeType Merging
+		internal MergeType Merging
 		{
 			get => (MergeType)TileDataPacking.Unpack(mergeData, 0, 8);
 			set => mergeData = (byte)TileDataPacking.Pack((byte)value, mergeData, 0, 8);
